@@ -10,7 +10,8 @@ from sklearn.metrics import accuracy_score, balanced_accuracy_score, \
 
 
 
-def analyse_cat_var(df, var, other_limit=0.01, tgt='tgt', label=None):
+def analyse_cat_var(df, var, other_limit=0.01, tgt='tgt',
+                    label=None, line_color='black'):
     """This function plots the average target value against a categorical
     variable, for all categories. It produces a plot with a black line
     representing the overall target mean.
@@ -29,6 +30,8 @@ def analyse_cat_var(df, var, other_limit=0.01, tgt='tgt', label=None):
         Target name. It has to be present into df.columns
     label : str, default None
         The title of the plot
+    line_color : str, default 'black'
+        The color of the line defining the overall target mean
     """
 
     # Select only important variables
@@ -48,12 +51,13 @@ def analyse_cat_var(df, var, other_limit=0.01, tgt='tgt', label=None):
     plt.xticks(rotation='vertical')
     df_barplot = df_analysis.groupby(var).agg({tgt: 'mean'}).reset_index()
     p = sns.barplot(x=var, y=tgt, data=df_barplot, ci=None)
-    p.axhline(m, ls='--', color='black')
+    p.axhline(m, ls='--', color=line_color)
 
 
 
 
-def analyse_num_var(df, var, q=(0, 0.25, 0.5, 0.75, 1), tgt='tgt', label=None):
+def analyse_num_var(df, var, q=(0, 0.25, 0.5, 0.75, 1), tgt='tgt',
+                    label=None, line_color='black'):
     """This function plots the average target value against a numerical
     variable, binning the values against a list of given quantiles. It produces
     a plot with a black line representing the overall target mean.
@@ -71,6 +75,8 @@ def analyse_num_var(df, var, q=(0, 0.25, 0.5, 0.75, 1), tgt='tgt', label=None):
         Target name. It has to be present into df.columns
     label : str, default None
         The title of the plot
+    line_color : str, default 'black'
+        The color of the line defining the overall target mean
     """
     
     # Compute the overall target mean
@@ -90,7 +96,7 @@ def analyse_num_var(df, var, q=(0, 0.25, 0.5, 0.75, 1), tgt='tgt', label=None):
     a.sort_values('ord', inplace=True)
     p = sns.barplot(x='aggr', y=tgt, data=a, ci=None)
     p.set_xlabel(var)
-    p.axhline(m, ls='--', color='black')
+    p.axhline(m, ls='--', color=line_color)
 
 
 def assess_model(y, y_prob, y_pred=None):

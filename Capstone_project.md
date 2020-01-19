@@ -2,7 +2,7 @@
 
 ## Capstone Project - Starbucks app data
 Matteo Felici
-January 18th, 2020
+January 19th, 2020
 
 ## I. Definition
 
@@ -46,8 +46,6 @@ Based on past data, we will compare the models prediction with the actual propen
 
 
 ## II. Analysis
-_(approx. 2-4 pages)_
-
 ### Data Exploration
 For this project we have 3 available data sources.
 
@@ -119,7 +117,7 @@ First of all, we build the 3 different targets. For **bogo** and **discount** we
 
 Since there's no real conversion (no *offer completed* record) for **Informational**, we develop a proxy. If we find a **transaction** right after an Informational offer view, we put that as propension. But how much hours is *right after*?
 
-```
+```python
 mean       43.230928
 min         0.000000
 25%         6.000000
@@ -189,76 +187,376 @@ As benchmark measure, we decided to take the current **conversion rate** for eac
 
 
 ## III. Methodology
-_(approx. 3-5 pages)_
-
 ### Data Preprocessing
-In this section, all of your preprocessing steps will need to be clearly documented, if any were necessary. From the previous section, any of the abnormalities or characteristics that you identified about the dataset will be addressed and corrected here. Questions to ask yourself when writing this section:
-- _If the algorithms chosen require preprocessing steps like feature selection or feature transformations, have they been properly documented?_
-- _Based on the **Data Exploration** section, if there were abnormalities or characteristics that needed to be addressed, have they been properly corrected?_
-- _If no preprocessing is needed, has it been made clear why?_
+Starting from the *journey* dataset described in Section 2 - *Data Exploration* we create 3 different datasets, one for each type of offer. Each of these datasets contains only the data portion relative to viewed offers of the same type: for example. **bogo** dataset contains all the viewed BOGO offers with the relative target about offer completion. After that, we need to apply some data pre-processing steps to each dataset. These steps are:
 
+- **data sampling:** since 2 out of 3 targets are unbalanced (*discount* is 66%, *info* 39%) we can sample data to have better performances on the model. In particular we apply the *undersampling* method: we take all the records of the lowest frequent class (0 for *discount*, 1 for *info*) and a random subset of the most frequent, in order to have a balanced 50-50% ratio
 
+- **train-valid-test split:** divide the input data into 3 parts, each one stratified by the target (the event percentage is the same both on the original dataset and the 3 derived ones). The *train* set is the "real" input dataset for the algorithm: all the weights and the formula will derive from the relations found on this set. The *valid* set is to tune the hyperparameters of each model (more on this in the next paragraph). Finally, the *test* set is to compare the results of the several developed models to choose the best one
+
+- **missing imputation:** substitute missing values in features, approximating the possible real value. The methods to impute are several: we use a constant value for the only categorical variable (missing *gender* is replaced by "O") and the *median value* for the numeric features. Another common way to address missing numerical values is using the *mean*, but we preferred the median because it is a robust statistics even with skewed data and with outliers
+
+- **categorical encoding:** a Machine Learning algorithm can use only numerical data, so we must transform the *gender* variable into a numeric feature. Since we've got only one categorical input with only 3 categories, we decided to use *One Hot Encoding*: this method creates a binary feature for each category of the original variable, and each binary feature is equal to 1 if the relative category is present on that record. Here's an example:
+
+  | Gender | Gender - M | Gender - F | Gender - O |
+  | :----: | :--------: | :--------: | :--------: |
+  |   M    |     1      |     0      |     0      |
+  |   F    |     0      |     1      |     0      |
+  |   O    |     0      |     0      |     1      |
+
+  For more complex categorical variables, with many different categories, this method could create too many binary flags, so other methodologies are preferred.
+
+- **data standardization:** for some algorithms an unbalanced distribution, with high skewness and outliers, could worsen the performance. For this reason we add a standardization step: each numerical feature is transformed with the formula
+  $$
+  z = \frac{x - \mu}{\sigma}
+  $$
 
 ### Implementation
-In this section, the process for which metrics, algorithms, and techniques that you implemented for the given data will need to be clearly documented. It should be abundantly clear how the implementation was carried out, and discussion should be made regarding any complications that occurred during this process. Questions to ask yourself when writing this section:
-- _Is it made clear how the algorithms and techniques were implemented with the given datasets or input data?_
-- _Were there any complications with the original metrics or techniques that required changing prior to acquiring a solution?_
-- _Was there any part of the coding process (e.g., writing complicated functions) that should be documented?_
+All the data pre-processing and the model building are developed under the **Amazon Web Services** infrastructure, specifically the **Sagemaker** component. This is a cloud Machine Learning platform to develop, tune, version, query and deploy Machine Learning models. In particular we will use the Python API of Sagemaker:
+
+- the data processing component, via `SKLearnProcessor` 
+- the hyperparameter tuning with the `HyperparameterTuner` component
+- the model development with the `Estimator` object
+- finally, the model query for result using the *Batch Transformation* part
+
+##### Data processing
+
+The `SKLearnProcessor` provides a way to run `scikit-learn` data-prep components on the Sagemaker cloud infrastructure. First, we have to create a Python script `./lib/preprocessing.py` containing all the steps described in the previous paragraph. In particular we use a combination of `Pipelines` and `ColumnTransformer` to join several operations on different feature subsets.
+
+First we sample data and make the split: this parts are not included in the pipelines because at serving time we won't need them.
+
+```python
+rus = RandomUnderSampler(random_state=seed)
+X_tot, y_tot = rus.fit_sample(df.drop(tgt, 1), df[tgt])
+
+# Split between train, validation and test data
+X, X_val, y, y_val = train_test_split(
+    X_tot, y_tot, test_size=args.val_split_ratio,
+    stratify=y_tot, random_state=seed
+)
+X, X_test, y, y_test = train_test_split(
+    X, y, test_size=args.test_split_ratio / (1 - args.val_split_ratio),
+    stratify=y, random_state=seed
+)
+```
+
+For undersampling we are using the `RandomUnderSampler` object from the`imblearn` library. The `val_split_ratio` and `test_split_ratio` are two arguments, passed at run time, that specify the portion of data for validation and test sets. After that we create two Pipelines, one for categorical data, the other for numeric data:
+
+```python
+# Preprocessing pipeline for gender
+# Imputing with "O", then One Hot Encoding
+gender_pipe = Pipeline(
+    [
+        ('imputer', SimpleImputer(strategy='constant', fill_value='O')),
+        ('ohe', OneHotEncoder())
+    ]
+)
+# Preprocessing pipeline for numeric features
+# Imputing with median, then standardizing distribution
+num_pipe = Pipeline(
+    [
+        ('imputer', SimpleImputer(strategy='median')),
+        ('scaler', StandardScaler())
+    ]
+)
+```
+
+Finally, we parallelize the two pipelines with a ColumnTransformer and apply them to all datasets:
+
+```python
+# Join the pipelines via a ColumnTransformer
+preprocessing = ColumnTransformer(transformers=[
+    ('gender_pipeline', gender_pipe, ['gender']),
+    ('numeric_pipeline', num_pipe, keep_vars[1:]) #all other vars are numeric
+])
+
+# Fit the transformer
+X = preprocessing.fit_transform(X)
+X_val = preprocessing.transform(X_val)
+X_test = preprocessing.transform(X_test)
+```
+
+Keep in mind that to use the datasets with Sagemaker's estimators, the output `csv` file must have no header and the target variable before the others:
+
+```python
+pd.concat([y.reset_index(drop=True), pd.DataFrame(X)], axis=1).to_csv(
+    os.path.join(f'/opt/ml/processing/output/{tgt}_train.csv'),
+    header=False, index=False
+)
+```
+
+We can now launch the job with the `SKLearnProcessor`:
+
+```python
+sklearn_processor = SKLearnProcessor(framework_version='0.20.0',
+                                     role=role,
+                                     instance_type='ml.m5.xlarge',
+                                     instance_count=1)
+sklearn_processor.run(
+    code='lib/preprocessing.py', #entrypoint for processing
+    inputs=[ProcessingInput(os.path.join('s3://', bucket, f'Capstone_Starbucks/{tgt}.csv'), '/opt/ml/processing/input')],
+    outputs=[
+        ProcessingOutput(source=f'/opt/ml/processing/output/',
+                         output_name=f'{tgt}_data')
+    ],
+    arguments=['--target', tgt]
+ )
+```
+
+This processor is run on each of the 3 starting datasets.
+
+##### Hyperparameter tuning
+
+This is a crucial part of the Machine Learning pipeline. Each algorithm has a set of *hyperparameters* (different from the *parameters*, that are calculated at train time) and we have to set them **before** the training part. For example, for the **XGBoost** algorithm we can set the *number of estimators*, the *maximum depth* for each extimator, the *subsample* of the trian data taken at each step.
+
+We first define a base estimator of the chosen type, putting a default value for each hyperparameter:
+
+```python
+container = get_image_uri(session.boto_region_name, 'xgboost', '0.90-1')
+
+xgb = sagemaker.estimator.Estimator(
+    container,
+    role,
+    train_instance_count=1,
+    train_instance_type='ml.c4.xlarge',
+    output_path=f's3://{bucket}/Capstone_Starbucks/{prefix}/model',
+    sagemaker_session=session,
+    base_job_name=prefix + '-'
+)
+
+
+xgb.set_hyperparameters(max_depth=4,
+                        eta=0.1,
+                        gamma=4,
+                        min_child_weight=6,
+                        colsample_bytree=0.5,
+                        subsample=0.6,
+                        early_stopping_rounds=10,
+                        num_round=200,
+                        seed=1123)
+```
+
+Then, we set a `HyperparameterTuner` object, specifying for each hyperparameter a range of values to try in the `hyperparameter_ranges` argument, and we fit the object (here `prefix` is a placeholder for the target name, *bogo, *discount* or *info*).
+
+```python
+xgb_hyperparameter_tuner = HyperparameterTuner(
+    estimator=xgb,
+   objective_metric_name='validation:f1', # we evaluate the performances with F1-score
+   objective_type='Maximize',
+   max_jobs=20,
+   max_parallel_jobs=4,
+   hyperparameter_ranges = {
+        'max_depth': IntegerParameter(2, 6),
+        'eta'      : ContinuousParameter(0.01, 0.5),
+        'gamma': ContinuousParameter(0, 10),
+        'min_child_weight': IntegerParameter(2, 8),
+        'colsample_bytree': ContinuousParameter(0.2, 1.0),
+        'subsample': ContinuousParameter(0.3, 1.0),
+   },
+   base_tuning_job_name=prefix + '-xgb-tuning'
+)
+
+s3_input_train = sagemaker.s3_input(s3_data=f's3://{bucket}/Capstone_Starbucks/{prefix}/{prefix}_train.csv', content_type='csv')
+
+s3_input_validation = sagemaker.s3_input(s3_data=f's3://{bucket}/Capstone_Starbucks/{prefix}/{prefix}_val.csv', content_type='csv')
+
+xgb_hyperparameter_tuner.fit({'train': s3_input_train, 'validation': s3_input_validation})
+```
+
+The tuning works this way:
+
+- Sagemaker trains a XGB instance applying a random choice (into the specified range) for each hyperparameter
+- it assess the model performances on the validation set calculating the specified metric (in our case, the **F1-score**)
+- using the Bayesian formula it constructs a probability space with the hyperparameters, understanding where the "right" hyperparameters (those which can maximize the performance) are
+- at each iteration it modifies the probability space, with a new set of hyperparameters tried
+
+At the end, we take the model with the best F1-score.
+
+##### Model development
+
+The other algorithm we choose to use, the Sagemaker's `LinearLearner`, does not have so many hyperparameters to tune, so we decided to directly train it. Similarly as before, we first instantiate the estimator, then we fit it:
+
+```python
+ll = LinearLearner(
+    role,
+    train_instance_count=1, 
+    train_instance_type='ml.c4.xlarge',
+    predictor_type='binary_classifier',
+    output_path='s3://{}/Capstone_Starbucks/{}/model'.format(bucket, prefix),
+    sagemaker_session=session,
+    binary_classifier_model_selection_criteria='f1',
+    epochs=100,
+    use_bias=True,
+    optimizer='adam',
+    loss='auto',
+    wd=0,
+    normalize_data=True,
+    unbias_data=True,
+    early_stopping_patience=5,
+    learning_rate=0.01,
+    balance_multiclass_weights=True
+)
+...
+ll.fit([train_data, validation_data], logs=False)
+```
+
+Here the algorithm iterates the learning process using the performances (F1-score) on the validation set as guide.
+
+##### Querying results
+
+We finally want to assess the models' performances with the test set. In order to do so, we use the `transformer` method of a Sagemaker estimator, that computes a one-time query of the model on a given set of records.
+
+```python
+transformer = model.transformer(instance_count = 1, instance_type = 'ml.m4.xlarge')
+transformers[prefix].transform(
+    f's3://{bucket}/Capstone_Starbucks/{prefix}/{prefix}_test.csv',
+    content_type='text/csv',
+    split_type='Line',
+    wait=True,
+    logs=False
+)
+
+# We download the output predictions to evaluate the model
+session.download_data(f'./data/{prefix}_preds', bucket,
+                      key_prefix='/'.join(transformers[prefix].output_path.split('/')[3:]))
+```
 
 ### Refinement
-In this section, you will need to discuss the process of improvement you made upon the algorithms and techniques you used in your implementation. For example, adjusting parameters for certain models to acquire improved solutions would fall under the refinement category. Your initial and final solutions should be reported, as well as any significant intermediate results as necessary. Questions to ask yourself when writing this section:
-- _Has an initial solution been found and clearly reported?_
-- _Is the process of improvement clearly documented, such as what techniques were used?_
-- _Are intermediate and final solutions clearly reported as the process is improved?_
+
+In a first time, we did not choose to sample the data: since the unbalance is not so strong, we tried to develop models with the original target distribution. However, we noticed that there were unbalanced predictions: the **Discount** model over-predicted the positive event and the **Informational** one viceversa. The predictions had the same unbalance as the target. For this reason, we chose to go for *undersampling* and, as we'll see in the next section, the performances improved quite a lot.
 
 
 ## IV. Results
-_(approx. 2-3 pages)_
-
 ### Model Evaluation and Validation
-In this section, the final model and any supporting qualities should be evaluated in detail. It should be clear how the final model was derived and why this model was chosen. In addition, some type of analysis should be used to validate the robustness of this model and its solution, such as manipulating the input data or environment to see how the model’s solution is affected (this is called sensitivity analysis). Questions to ask yourself when writing this section:
-- _Is the final model reasonable and aligning with solution expectations? Are the final parameters of the model appropriate?_
-- _Has the final model been tested with various inputs to evaluate whether the model generalizes well to unseen data?_
-- _Is the model robust enough for the problem? Do small perturbations (changes) in training data or the input space greatly affect the results?_
-- _Can results found from the model be trusted?_
+##### BOGO
+
+| Algorithm     | F1-Score   |
+| ------------- | ---------- |
+| **XGBoost**   | **0.7366** |
+| LinearLearner | 0.7135     |
+
+The XGBoost tuning resulted in F1-scores on the validation set ranging from 0.7099 to 0.7366. The best one has these hyperparameters:
+
+- colsample_bytree: 0.665418398434084
+- eta: 0.3024061838045679
+- gamma: 0.15467677184991543
+- max_depth: 3
+- min_child_weight: 8
+- subsample: 0.7285079986427208
+
+We apply the model to test set with these results:
+
+| metric    | value      |
+| --------- | ---------- |
+| accuracy  | 62.24%     |
+| precision | 60.11%     |
+| recall    | 72.80%     |
+| **f1**    | **65.85%** |
+
+*Confusion Matrix - normalized by row*
+
+| a          | Predicted 0 | Predicted 1 |
+| ---------- | :---------: | :---------: |
+| **True 0** |   51.68%    |   48.32%    |
+| **True 1** |   27.20%    |   72.80%    |
+
+
+
+##### Discount
+
+| Algorithm     | F1-Score   |
+| ------------- | ---------- |
+| **XGBoost**   | **0.7282** |
+| LinearLearner | 0.7092     |
+
+The XGBoost tuning resulted in F1-scores on the validation set ranging from 0.6980 to 0.7282. The best one has these hyperparameters:
+
+- colsample_bytree: 0.778622530979818
+- eta: 0.4561709659187462
+- gamma: 4.844954586874898
+- max_depth: 5
+- min_child_weight: 2
+- subsample: 0.9165187239747279
+
+We apply the model to test set with these results:
+
+| metric    | value      |
+| --------- | ---------- |
+| accuracy  | 64,98%     |
+| precision | 64,01%     |
+| recall    | 68,44%     |
+| **f1**    | **66,15%** |
+
+*Confusion Matrix - normalized by row*
+
+| a          | Predicted 0 | Predicted 1 |
+| ---------- | :---------: | :---------: |
+| **True 0** |   61.51%    |   38.49%    |
+| **True 1** |   31.56%    |   68.44%    |
+
+
+
+##### Informational
+
+| Algorithm         | F1-Score   |
+| ----------------- | ---------- |
+| XGBoost           | 0.6660     |
+| **LinearLearner** | **0.6915** |
+
+In this case the best model is the LinearLearner, with these hyperparameters:
+
+- epochs: 100
+- learning_rate: 0.01
+- loss: auto
+- mini_batch_size: 1000
+- optimizer: adam
+
+We apply the model to test set with these results:
+
+| metric    | value      |
+| --------- | ---------- |
+| accuracy  | 56,12%     |
+| precision | 53,47%     |
+| recall    | 93,39%     |
+| **f1**    | **68,00%** |
+
+*Confusion Matrix - normalized by row*
+
+| a          | Predicted 0 | Predicted 1 |
+| ---------- | :---------: | :---------: |
+| **True 0** |   18.96%    |   81.04%    |
+| **True 1** |    6.61%    |   93.39%    |
+
+
 
 ### Justification
-In this section, your model’s final solution and its results should be compared to the benchmark you established earlier in the project using some type of statistical analysis. You should also justify whether these results and the solution are significant enough to have solved the problem posed in the project. Questions to ask yourself when writing this section:
-- _Are the final results found stronger than the benchmark result reported earlier?_
-- _Have you thoroughly analyzed and discussed the final solution?_
-- _Is the final solution significant enough to have solved the problem?_
+We can see that the precisions of 2 out of 3 models are higher than our benchmark, the current conversion rate: 
+
+| Offer         | Current CR | Model precision | Delta   |
+| ------------- | :--------: | --------------- | ------- |
+| BOGO          |   50.47%   | 60.11%          | +9.64%  |
+| Discount      |   65.73%   | 64,01%          | -1.72%  |
+| Informational |   38.82%   | 53,47%          | +14.65% |
+
+The only negative case, **Discount**, have a small negative delta; the other two cases have a real positive delta. I think that the **Informational** is especially important, since on these type of offer Starbucks does not have to give money as reward. 
 
 
 ## V. Conclusion
-_(approx. 1-2 pages)_
-
-### Free-Form Visualization
-In this section, you will need to provide some form of visualization that emphasizes an important quality about the project. It is much more free-form, but should reasonably support a significant result or characteristic about the problem that you want to discuss. Questions to ask yourself when writing this section:
-- _Have you visualized a relevant or important quality about the problem, dataset, input data, or results?_
-- _Is the visualization thoroughly analyzed and discussed?_
-- _If a plot is provided, are the axes, title, and datum clearly defined?_
-
 ### Reflection
-In this section, you will summarize the entire end-to-end problem solution and discuss one or two particular aspects of the project you found interesting or difficult. You are expected to reflect on the project as a whole to show that you have a firm understanding of the entire process employed in your work. Questions to ask yourself when writing this section:
-- _Have you thoroughly summarized the entire process you used for this project?_
-- _Were there any interesting aspects of the project?_
-- _Were there any difficult aspects of the project?_
-- _Does the final model and solution fit your expectations for the problem, and should it be used in a general setting to solve these types of problems?_
+Let's summarize all the different steps followed in this process.
+
+1. We analyse the 3 different datasets containing information about offers in Starbucks app
+2. Then we reconstruct the customer's journey through offer view, completion and transaction
+3. After that, we create new input features to better understand one customer's behavior
+4. We made some pre-process on input data
+5. We develop different Machine Learning models, comparing them and choosing one champion model for each type of offer
+
+I think that wrangling the data and understanding all the different special cases to reconstruct customer' journey was the most difficult and time consuming part. I personally took several iteration, founding every time some edge case not taken under consideration. Also the model development through the Sagemaker platform was challenging, but very rewarding.
 
 ### Improvement
-In this section, you will need to provide discussion as to how one aspect of the implementation you designed could be improved. As an example, consider ways your implementation can be made more general, and what would need to be modified. You do not need to make this improvement, but the potential solutions resulting from these changes are considered and compared/contrasted to your current solution. Questions to ask yourself when writing this section:
-- _Are there further improvements that could be made on the algorithms or techniques you used in this project?_
-- _Were there algorithms or techniques you researched that you did not know how to implement, but would consider using if you knew how?_
-- _If you used your final solution as the new benchmark, do you think an even better solution exists?_
+We could achieve further improvements in several ways:
 
------------
-
-**Before submitting, ask yourself. . .**
-
-- Does the project report you’ve written follow a well-organized structure similar to that of the project template?
-- Is each section (particularly **Analysis** and **Methodology**) written in a clear, concise and specific fashion? Are there any ambiguous terms or phrases that need clarification?
-- Would the intended audience of your project be able to understand your analysis, methods, and results?
-- Have you properly proof-read your project report to assure there are minimal grammatical and spelling mistakes?
-- Are all the resources used for this project correctly cited and referenced?
-- Is the code that implements your solution easily readable and properly commented?
-- Does the code execute without error and produce results similar to those reported?
+- the most relevant thing could be have more input features. Data about app usage and about which types of products a customer buys could really help understanding one's behavior
+- also having more records at our disposal could improve the model's performances
+- we could set a minimum precision for the **Discount** model in order to have a non-negative delta with the current benchmark
+- we could try other algorithms, such as Neural Networks, SVM and Random Forests, as they could better suit this particular use case
