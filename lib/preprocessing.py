@@ -3,12 +3,14 @@ import pandas as pd
 import argparse
 
 os.system('pip install joblib')
+os.system('pip install imblearn')
 
 from sklearn.model_selection import train_test_split
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
+from imblearn.under_sampling import RandomUnderSampler
 import joblib
 
 # Input variables
@@ -39,11 +41,14 @@ if __name__ == '__main__':
     # Read data
     input_path = os.path.join('/opt/ml/processing/input', f'{tgt}.csv')
     df = pd.read_csv(input_path, header=None, names=[tgt] + keep_vars)
+    
+    rus = RandomUnderSampler(random_state=seed)
+    X_tot, y_tot = rus.fit_sample(df.drop(tgt, 1), df[tgt])
 
     # Split between train, validation and test data
     X, X_val, y, y_val = train_test_split(
-        df.drop(tgt, 1), df[tgt], test_size=args.val_split_ratio,
-        stratify=df[tgt], random_state=seed
+        X_tot, y_tot, test_size=args.val_split_ratio,
+        stratify=y_tot, random_state=seed
     )
     X, X_test, y, y_test = train_test_split(
         X, y, test_size=args.test_split_ratio / (1 - args.val_split_ratio),
@@ -80,15 +85,19 @@ if __name__ == '__main__':
     X_test = preprocessing.transform(X_test)
 
     # Save data
-    pd.concat([pd.Series(y), pd.DataFrame(X)], axis=1).to_csv(
+    pd.concat([y.reset_index(drop=True), pd.DataFrame(X)], axis=1).to_csv(
         os.path.join(f'/opt/ml/processing/output/{tgt}_train.csv'),
         header=False, index=False
     )
-    pd.concat([pd.Series(y_val), pd.DataFrame(X_val)], axis=1).to_csv(
+    pd.concat([y_val.reset_index(drop=True), pd.DataFrame(X_val)], axis=1).to_csv(
         os.path.join(f'/opt/ml/processing/output/{tgt}_val.csv'),
         header=False, index=False
     )
-    pd.concat([pd.Series(y_test), pd.DataFrame(X_test)], axis=1).to_csv(
+    pd.Series(y_test.reset_index(drop=True)).to_csv(
+        os.path.join(f'/opt/ml/processing/output/{tgt}_test_tgt.csv'),
+        header=False, index=False
+    )
+    pd.DataFrame(X_test).to_csv(
         os.path.join(f'/opt/ml/processing/output/{tgt}_test.csv'),
         header=False, index=False
     )

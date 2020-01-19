@@ -4,22 +4,31 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from IPython.display import display
 
-def analyse_cat_var(df, var, other_limit=0.01, tgt='tgt', label=None,
-                    dist=True):
-    """
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, \
+    precision_score, recall_score, f1_score, average_precision_score, \
+    roc_auc_score, roc_curve
+
+
+
+def analyse_cat_var(df, var, other_limit=0.01, tgt='tgt', label=None):
+    """This function plots the average target value against a categorical
+    variable, for all categories. It produces a plot with a black line
+    representing the overall target mean.
 
     Parameters
     ----------
-    df
-    var
-    other_limit
-    tgt
-    label
-    dist
-
-    Returns
-    -------
-
+    df : pandas.DataFrame
+        Input data
+    var : str
+        Variable to analyse against the target. It has to be present into
+        df.columns
+    other_limit : float, default 0.001
+        All categories with frequency below this threshold are binned into a
+        "OTHER" category
+    tgt : str, default "tgt"
+        Target name. It has to be present into df.columns
+    label : str, default None
+        The title of the plot
     """
 
     # Select only important variables
@@ -31,106 +40,102 @@ def analyse_cat_var(df, var, other_limit=0.01, tgt='tgt', label=None,
     if len(others_list) > 1:
         df_analysis[var] = df_analysis[var].replace(others_list, 'OTHER')
 
-    # If dist == True, plot the distribution
-    if dist:
-        ind = df_analysis[var].value_counts().index
-        m = df_analysis[tgt].mean()
+    # Compute the overall target mean
+    m = df_analysis[tgt].mean()
 
-        ### Plot
-        fig, axs = plt.subplots(figsize=(14, 4))
-        fig.subplots_adjust(hspace=0.4, wspace=0.4)
-        fig.suptitle(label, fontsize=20)
-
-        # Frequenza
-        fig.add_subplot(121)
-        plt.title('Distribution')
-        plt.xticks(rotation='vertical')
-        sns.countplot(x=var, data=df_analysis, order=ind)
-
-        # Target
-        plt.subplot(122)
-        plt.title('Percentage of target')
-        plt.xticks(rotation='vertical')
-        df_barplot = df_analysis.groupby(var).agg({tgt: 'mean'}).reset_index()
-        p = sns.barplot(x=var, y=tgt, data=df_barplot, ci=None, order=ind)
-        p.axhline(m, ls='--', color='black')
-
-    # Else plot only feature VS target
-    else:
-        m = df_analysis[tgt].mean()
-
-        plt.title(label)
-        plt.xticks(rotation='vertical')
-        df_barplot = df_analysis.groupby(var).agg({tgt: 'mean'}).reset_index()
-        p = sns.barplot(x=var, y=tgt, data=df_barplot, ci=None)
-        p.axhline(m, ls='--', color='black')
+    plt.title(label)
+        
+    plt.xticks(rotation='vertical')
+    df_barplot = df_analysis.groupby(var).agg({tgt: 'mean'}).reset_index()
+    p = sns.barplot(x=var, y=tgt, data=df_barplot, ci=None)
+    p.axhline(m, ls='--', color='black')
 
 
 
-def analyse_num_var(df, var, q=(0, 0.25, 0.5, 0.75, 1), tgt='tgt', label=None,
-                    dist=True):
-    """
+
+def analyse_num_var(df, var, q=(0, 0.25, 0.5, 0.75, 1), tgt='tgt', label=None):
+    """This function plots the average target value against a numerical
+    variable, binning the values against a list of given quantiles. It produces
+    a plot with a black line representing the overall target mean.
 
     Parameters
     ----------
-    df
-    var
-    q
-    tgt
-    label
-    dist
+    df : pandas.DataFrame
+        Input data
+    var : str
+        Variable to analyse against the target. It has to be present into
+        df.columns
+    q : iterable of float, default (0, 0.25, 0.5, 0.75, 1)
+        Quantiles to bin the nunmerical values
+    tgt : str, default "tgt"
+        Target name. It has to be present into df.columns
+    label : str, default None
+        The title of the plot
+    """
+    
+    # Compute the overall target mean
+    m = df[tgt].mean()
+
+    plt.title(label)
+        
+    plt.xticks(rotation='vertical')
+    tmp = df[[var, tgt]].copy()
+    cuts = np.quantile(df[var].dropna(), q)
+    tmp['aggr'] = pd.cut(tmp[var], bins=cuts, duplicates='drop',
+                         include_lowest=True).astype(str)
+    a = tmp.groupby('aggr').agg({tgt: 'mean'}).reset_index()
+    a['ord'] = a['aggr'].apply(
+        lambda x: float(x[1:].split(',')[0]) if x != 'nan' else np.nan
+    )
+    a.sort_values('ord', inplace=True)
+    p = sns.barplot(x='aggr', y=tgt, data=a, ci=None)
+    p.set_xlabel(var)
+    p.axhline(m, ls='--', color='black')
+
+
+def assess_model(y, y_prob, y_pred=None):
+    """Given the truth labels and the model predictions (for a binary
+    classification problem), this function provides a list of performance
+    measures for a Machine Learning models. It also plots the ROC Curve and
+    the Confusion/Classification Matrix.
+
+    Parameters
+    ----------
+    y : list or numpy.array
+        The ground truth labels
+    y_prob : list or numpy.array
+        Probabilities returned by the model
+    y_pred : list or numpy.array, default None
+        Predictions returned by the model. If None, these are calculated from
+        y_prob with a 0.50 threshold
 
     Returns
     -------
+    res : pandas.Datarame
+        This dataset contains a list of the most used performance measures for
+        the data provided
 
     """
-    # If dist == True, plot the distribution
-    if dist:
-        m = df[tgt].mean()
 
-        ### Plot
-        fig, axs = plt.subplots(figsize=(14, 4))
-        fig.subplots_adjust(hspace=0.4, wspace=0.4)
-        fig.suptitle(label, fontsize=20)
+    if y_pred is None:
+        y_pred = pd.Series([1 if x >= 0.5 else 0 for x in y_prob])
+        
+    res = pd.DataFrame(
+        {'value': [accuracy_score(y, y_pred),
+                   balanced_accuracy_score(y, y_pred),
+                   precision_score(y, y_pred), recall_score(y, y_pred),
+                   f1_score(y, y_pred),
+                   average_precision_score(y, y_prob),
+                   roc_auc_score(y, y_prob)]
+         },
+        index=['accuracy', 'balanced_accuracy', 'precision', 'recall', 'f1',
+               'average_precision', 'AUC']
+    )
 
-        # Frequenza
-        fig.add_subplot(121)
-        plt.title('Distribution')
-        plt.xticks(rotation='vertical')
-        inf, sup = np.quantile(df[var].dropna(), q=[0.01, 0.99])
-        sns.distplot(
-            df.loc[(df[var] >= inf) & (df[var] <= sup), var], kde=False, bins=10
-        )
+    fpr, tpr, _ = roc_curve(y, y_prob)
+    plt.plot(fpr, tpr)
+    plt.show()
 
-        # Target
-        plt.subplot(122)
-        plt.title('Percentage of target')
-        plt.xticks(rotation='vertical')
-        tmp = df[[var, tgt]].copy()
-        cuts = np.quantile(df[var].dropna(), q)
-        tmp['aggr'] = pd.cut(tmp[var], bins=cuts, duplicates='drop').astype(str)
-        a = tmp.groupby('aggr').agg({tgt: 'mean'}).reset_index()
-        a['ord'] = a['aggr'].apply(
-            lambda x: float(x[1:].split(',')[0]) if x != 'nan' else np.nan
-        )
-        a.sort_values('ord', inplace=True)
-        p = sns.barplot(x='aggr', y=tgt, data=a, ci=None)
-        p.axhline(m, ls='--', color='black')
+    display(pd.crosstab(y, y_pred, normalize='index'))
 
-
-    # Else plot only feature VS target
-    else:
-        m = df[tgt].mean()
-
-        plt.title(label)
-        plt.xticks(rotation='vertical')
-        tmp = df[[var, tgt]].copy()
-        cuts = np.quantile(df[var].dropna(), q)
-        tmp['aggr'] = pd.cut(tmp[var], bins=cuts, duplicates='drop').astype(str)
-        a = tmp.groupby('aggr').agg({tgt: 'mean'}).reset_index()
-        a['ord'] = a['aggr'].apply(
-            lambda x: float(x[1:].split(',')[0]) if x != 'nan' else np.nan
-        )
-        a.sort_values('ord', inplace=True)
-        p = sns.barplot(x='aggr', y=tgt, data=a, ci=None)
-        p.axhline(m, ls='--', color='black')
+    return res
